@@ -19,6 +19,13 @@
     "rmse": 0.0339832800820155,
     "mae": 0.029954180947092207
   },
+  "al_hourani": {
+    "environment": "urban",
+    "alpha": 9.61,
+    "beta": 0.16,
+    "rmse": 0.4418051945106376,
+    "mae": 0.39699949346581953
+  },
   "path_loss": {
     "los": {
       "n": 1.9999999999999996,
@@ -35,6 +42,23 @@
       "mae_db": 4.773318565340371
     }
   },
+  "classic_path_loss_models": [
+    {
+      "name": "fspl_baseline",
+      "type": "fspl_offset",
+      "enabled": true,
+      "freq_hz": 2400000000.0,
+      "nlos_offset_db": 20.0
+    },
+    {
+      "name": "3gpp_uma",
+      "type": "3gpp_uma",
+      "enabled": true,
+      "freq_ghz": 2.4,
+      "h_ut_m": 1.5
+    }
+  ],
+  "low_angle_bias_al_minus_fit": 0.017002210314823428,
   "global": {
     "los_ratio": 0.26728757336055115,
     "path_loss_mean_db": 98.96328651722332,

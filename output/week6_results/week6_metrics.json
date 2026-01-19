@@ -1,0 +1,39 @@
+{
+  "input_files": [
+    "D:\\\u4f4e\u7a7a\u94fe\u8def\u4fe1\u9053\u5efa\u6a21\\output\\run_big_links.npz"
+  ],
+  "quality": {
+    "total": 31352,
+    "bad_total": 0,
+    "bad_distance": 0,
+    "bad_elevation": 0,
+    "bad_path_loss": 0,
+    "bad_rx": 0,
+    "bad_outlier": 0
+  },
+  "fit_logistic": {
+    "a": 10.253072412919883,
+    "b": 0.04698086833956086,
+    "c": 10.228642206442432
+  },
+  "path_loss_fit": {
+    "n_los": 1.9999999999999996,
+    "pl0_los": 40.045997020280765,
+    "n_nlos": 2.0018874993826943,
+    "pl0_nlos": 60.00503518277113
+  },
+  "plos_metrics": {
+    "fit_logistic": [
+      0.03489538043927222,
+      0.030768167570366822
+    ],
+    "al_hourani_urban": [
+      0.4580598286096704,
+      0.4191100896006145
+    ],
+    "al_hourani_dense": [
+      0.3146280730266498,
+      0.26322329784759185
+    ]
+  }
+}

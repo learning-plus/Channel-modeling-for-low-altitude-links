@@ -9,6 +9,13 @@ p(LoS)=1/(1+a*exp(-b*(theta-c)))
 - RMSE: 0.033983
 - MAE: 0.029954
 
+## Classic LoS Probability (Al-Hourani)
+- env: urban
+- alpha: 9.610000
+- beta: 0.160000
+- RMSE: 0.441805
+- MAE: 0.396999
+
 ## Path Loss Model (PL(d)=PL(d0)+10n*log10(d/d0), d0=1m)
 - LoS: n=2.000000, PL(d0)=40.045997 dB, sigma=0.000000 dB
   RMSE=0.000000 dB, MAE=0.000000 dB

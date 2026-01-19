@@ -27,8 +27,14 @@ p(LoS)=1/(1+a*exp(-b*(theta-c)))
 - fit_params.csv
 - fit_metrics.json
 - plos_binned.csv
+- classic_params.csv
+- classic_performance.csv
+- classic_comparison_notes.md
 - los_prob_vs_elevation.png
 - path_loss_fit.png
+- plos_compare.png
+- classic_path_loss_compare.png
+- classic_error_cdf.png
 - hist_elevation.png
 - hist_distance.png
 - residual_hist_los.png

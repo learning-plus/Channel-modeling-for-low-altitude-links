@@ -1,0 +1,10 @@
+model,parameter,value
+al_hourani,environment,urban
+al_hourani,alpha,9.610000
+al_hourani,beta,0.160000
+fspl_baseline,type,fspl_offset
+fspl_baseline,freq_hz,2.400000e+09
+fspl_baseline,nlos_offset_db,20.000000
+3gpp_uma,type,3gpp_uma
+3gpp_uma,freq_ghz,2.4
+3gpp_uma,h_ut_m,1.5

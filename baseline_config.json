@@ -1,0 +1,58 @@
+﻿{
+  "data": {
+    "output_dir": "output",
+    "npz_pattern": "*_links.npz",
+    "csv_patterns": [
+      "*_links_*.csv",
+      "dataset_links_*.csv",
+      "run_big_links_*.csv"
+    ]
+  },
+  "units": {
+    "distance": "m",
+    "frequency": "Hz",
+    "angle": "deg"
+  },
+  "bins": {
+    "elevation_bin_deg": 5.0,
+    "elevation_min_deg": 0.0,
+    "elevation_max_deg": 90.0,
+    "min_samples_per_bin": 20,
+    "d2d_bin_m": 50.0,
+    "d2d_min_m": 0.0,
+    "d2d_max_m": 2000.0
+  },
+  "angle_regions": [
+    {"name": "low", "min_deg": 0.0, "max_deg": 15.0},
+    {"name": "mid", "min_deg": 15.0, "max_deg": 45.0},
+    {"name": "high", "min_deg": 45.0, "max_deg": 90.0}
+  ],
+  "quality": {
+    "min_distance_m": 0.0,
+    "max_distance_m": null,
+    "min_elevation_deg": 0.0,
+    "max_elevation_deg": 90.0,
+    "min_path_loss_db": null,
+    "max_path_loss_db": null,
+    "drop_outliers": false
+  },
+  "fspl": {
+    "freq_hz": 2400000000.0
+  },
+  "al_hourani": {
+    "urban": {"alpha": 9.61, "beta": 0.16, "eta_los_db": 1.0, "eta_nlos_db": 20.0},
+    "dense_urban": {"alpha": 12.08, "beta": 0.11, "eta_los_db": 1.6, "eta_nlos_db": 23.0}
+  },
+  "3gpp": {
+    "scenario": "uma",
+    "enable_umi_sc": false,
+    "freq_ghz": 2.4,
+    "bs_height_m": 25.0,
+    "ut_height_range_m": [1.5, 22.5],
+    "height_handling": "clamp",
+    "fixed_ut_height_m": 22.5
+  },
+  "plot": {
+    "max_scatter_points": 8000
+  }
+}

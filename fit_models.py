@@ -18,6 +18,45 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
+# 光速常量（m/s），用于 3GPP 公式中的断点距离计算
+SPEED_OF_LIGHT = 3.0e8
+
+# Al-Hourani 常见环境参数（文献常用值，可按需调整）
+AL_HOURANI_PRESETS = {
+    "suburban": (4.88, 0.43),
+    "urban": (9.61, 0.16),
+    "dense_urban": (12.08, 0.11),
+    "highrise": (27.23, 0.08),
+}
+
+# 经典路径损耗模型配置（可按需改为 3GPP 参数）
+CLASSIC_PATH_LOSS_MODELS = [
+    {
+        "name": "fspl_baseline",
+        "type": "fspl_offset",
+        "enabled": True,
+        "freq_hz": 2.4e9,
+        "nlos_offset_db": 20.0,
+    },
+    {
+        "name": "3gpp_uma",
+        "type": "3gpp_uma",
+        "enabled": True,
+        "freq_ghz": 2.4,
+        "h_ut_m": 1.5,
+    },
+    {
+        "name": "3gpp_placeholder",
+        "type": "log_distance",
+        "enabled": False,
+        "los": {"A_db": None, "n": None},
+        "nlos": {"A_db": None, "n": None},
+    },
+]
+
+# 误差阈值（用于统计“±X dB 以内”的比例）
+ERROR_THRESHOLDS_DB = [3.0, 5.0, 10.0]
+
 def find_latest_npz(output_dir: Path) -> Optional[Path]:
     """在输出目录里找最新的 .npz 文件（作为优先数据源）。"""
     candidates = sorted(output_dir.glob("*_links.npz"))
@@ -50,6 +89,7 @@ def load_csv_datasets(paths: List[Path]) -> Tuple[List[str], List[List[float]]]:
     rows: List[List[float]] = []
     columns: List[str] = []
     for path in paths:
+        # 逐个文件读取并追加
         with path.open("r", newline="") as f:
             reader = csv.reader(f)
             header = next(reader)
@@ -121,6 +161,46 @@ def bin_los_probability(
 def logistic_prob(theta: float, a: float, b: float, c: float) -> float:
     """Logistic LoS 概率模型：p=1/(1+a*exp(-b*(theta-c)))。"""
     return 1.0 / (1.0 + a * math.exp(-b * (theta - c)))
+
+
+def al_hourani_prob(theta: float, alpha: float, beta: float) -> float:
+    """Al-Hourani LoS 概率模型：p=1/(1+alpha*exp(-beta*(theta-alpha)))。"""
+    return 1.0 / (1.0 + alpha * math.exp(-beta * (theta - alpha)))
+
+
+def fspl_db(distance_m: float, freq_hz: float) -> float:
+    """自由空间路径损耗（FSPL），单位 dB。"""
+    if distance_m <= 0 or freq_hz <= 0:
+        return float("nan")
+    wavelength = 3.0e8 / freq_hz
+    return 20.0 * math.log10(4.0 * math.pi * distance_m / wavelength)
+
+
+def uma_los_path_loss(d2d_m: float, d3d_m: float, fc_ghz: float, h_bs_m: float, h_ut_m: float) -> float:
+    """3GPP UMa LoS 路径损耗（TR 38.901 简化版）。"""
+    if d2d_m <= 0 or d3d_m <= 0 or fc_ghz <= 0:
+        return float("nan")
+    if h_bs_m <= 0 or h_ut_m <= 0:
+        return float("nan")
+    # 断点距离 d_bp
+    d_bp = 4.0 * max(h_bs_m - 1.0, 0.0) * max(h_ut_m - 1.0, 0.0) * (fc_ghz * 1e9) / SPEED_OF_LIGHT
+    pl1 = 28.0 + 22.0 * math.log10(d3d_m) + 20.0 * math.log10(fc_ghz)
+    if d_bp <= 0 or d2d_m <= d_bp:
+        return pl1
+    pl2 = (
+        28.0
+        + 40.0 * math.log10(d3d_m)
+        + 20.0 * math.log10(fc_ghz)
+        - 9.0 * math.log10(d_bp * d_bp + (h_bs_m - h_ut_m) ** 2)
+    )
+    return pl2
+
+
+def uma_nlos_path_loss(d3d_m: float, fc_ghz: float, h_ut_m: float) -> float:
+    """3GPP UMa NLoS 路径损耗（TR 38.901 简化版）。"""
+    if d3d_m <= 0 or fc_ghz <= 0:
+        return float("nan")
+    return 13.54 + 39.08 * math.log10(d3d_m) + 20.0 * math.log10(fc_ghz) - 0.6 * (h_ut_m - 1.5)
 
 
 def fit_los_probability(theta: List[float], p: List[float], weights: List[int]) -> Tuple[float, float, float]:
@@ -244,6 +324,88 @@ def rmse_mae(y_true: List[float], y_pred: List[float], weights: Optional[List[in
     return math.sqrt(mse), mae
 
 
+def predict_classic_path_loss(
+    distances: List[float],
+    los_flags: List[int],
+    model: Dict,
+    horizontal_m: Optional[List[float]] = None,
+    uav_heights: Optional[List[float]] = None,
+    user_height_m: float = 1.5,
+) -> List[float]:
+    """根据经典模型配置预测路径损耗（按样本逐条输出）。"""
+    preds: List[float] = []
+    if model.get("type") == "fspl_offset":
+        freq_hz = model.get("freq_hz", 2.4e9)
+        offset = model.get("nlos_offset_db", 20.0)
+        for d, los in zip(distances, los_flags):
+            base = fspl_db(d, freq_hz)
+            preds.append(base if los == 1 else base + offset)
+        return preds
+
+    if model.get("type") == "log_distance":
+        los_cfg = model.get("los", {})
+        nlos_cfg = model.get("nlos", {})
+        for d, los in zip(distances, los_flags):
+            cfg = los_cfg if los == 1 else nlos_cfg
+            A = cfg.get("A_db")
+            n = cfg.get("n")
+            if A is None or n is None or d <= 0:
+                preds.append(float("nan"))
+            else:
+                preds.append(A + 10.0 * n * math.log10(d))
+        return preds
+
+    if model.get("type") == "3gpp_uma":
+        if horizontal_m is None or uav_heights is None:
+            return [float("nan")] * len(distances)
+        fc_ghz = model.get("freq_ghz", 2.4)
+        h_ut = model.get("h_ut_m", user_height_m)
+        for d3d, d2d, h_bs, los in zip(distances, horizontal_m, uav_heights, los_flags):
+            if not math.isfinite(d3d) or not math.isfinite(d2d) or not math.isfinite(h_bs):
+                preds.append(float("nan"))
+                continue
+            pl_los = uma_los_path_loss(d2d, d3d, fc_ghz, h_bs, h_ut)
+            pl_nlos = uma_nlos_path_loss(d3d, fc_ghz, h_ut)
+            if los == 1:
+                preds.append(pl_los)
+            else:
+                preds.append(max(pl_los, pl_nlos))
+        return preds
+
+    return [float("nan")] * len(distances)
+
+
+def compute_error_metrics(errors: List[float]) -> Dict[str, float]:
+    """计算误差指标（均值、RMSE、MAE）。"""
+    valid = [e for e in errors if math.isfinite(e)]
+    if not valid:
+        return {"mean": float("nan"), "rmse": float("nan"), "mae": float("nan")}
+    mean_err = sum(valid) / len(valid)
+    rmse = math.sqrt(sum(e * e for e in valid) / len(valid))
+    mae = sum(abs(e) for e in valid) / len(valid)
+    return {"mean": mean_err, "rmse": rmse, "mae": mae}
+
+
+def percent_within(errors: List[float], threshold_db: float) -> float:
+    """统计误差落在 ±threshold_db 内的比例。"""
+    valid = [e for e in errors if math.isfinite(e)]
+    if not valid:
+        return float("nan")
+    count = sum(1 for e in valid if abs(e) <= threshold_db)
+    return count / len(valid)
+
+
+def build_cdf(values: List[float]) -> Tuple[List[float], List[float]]:
+    """生成 CDF 曲线数据（x, y）。"""
+    valid = sorted(v for v in values if math.isfinite(v))
+    if not valid:
+        return [], []
+    n = len(valid)
+    xs = valid
+    ys = [(i + 1) / n for i in range(n)]
+    return xs, ys
+
+
 def plot_los_vs_elevation(
     centers: List[float],
     probs: List[float],
@@ -348,6 +510,158 @@ def plot_histogram(values: List[float], bins: int, title: str, xlabel: str, outp
     return True
 
 
+def plot_path_loss_classic(
+    distances: List[float],
+    path_losses: List[float],
+    los_flags: List[int],
+    classic_models: List[Dict],
+    output_path: Path,
+    max_points: int = 8000,
+    uav_heights: Optional[List[float]] = None,
+    user_height_m: float = 1.5,
+) -> bool:
+    """在散点图上叠加经典模型曲线(LoS/NLoS)。"""
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception:
+        return False
+
+    data = list(zip(distances, path_losses, los_flags))
+    if len(data) > max_points:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(data), size=max_points, replace=False)
+        data = [data[i] for i in idx]
+
+    d = np.array([v[0] for v in data], dtype=float)
+    pl = np.array([v[1] for v in data], dtype=float)
+    los = np.array([v[2] for v in data], dtype=int)
+
+    plt.figure(figsize=(6.8, 4.6))
+    plt.scatter(d[los == 1], pl[los == 1], s=10, alpha=0.45, color="tab:blue", label="LoS samples")
+    plt.scatter(d[los == 0], pl[los == 0], s=10, alpha=0.45, color="tab:red", label="NLoS samples")
+
+    x_fit = np.logspace(math.log10(max(1.0, min(distances))), math.log10(max(distances)), 120)
+    for model in classic_models:
+        name = model.get("name", "classic")
+        if model.get("type") == "fspl_offset":
+            freq_hz = model.get("freq_hz", 2.4e9)
+            offset = model.get("nlos_offset_db", 20.0)
+            y_los = [fspl_db(dv, freq_hz) for dv in x_fit]
+            y_nlos = [v + offset for v in y_los]
+            plt.plot(x_fit, y_los, linewidth=1.8, label=f"{name}-LoS")
+            plt.plot(x_fit, y_nlos, linewidth=1.8, linestyle="--", label=f"{name}-NLoS")
+        elif model.get("type") == "log_distance":
+            los_cfg = model.get("los", {})
+            nlos_cfg = model.get("nlos", {})
+            A_los = los_cfg.get("A_db")
+            n_los = los_cfg.get("n")
+            A_nlos = nlos_cfg.get("A_db")
+            n_nlos = nlos_cfg.get("n")
+            if A_los is not None and n_los is not None:
+                y_los = A_los + 10.0 * n_los * np.log10(x_fit)
+                plt.plot(x_fit, y_los, linewidth=1.8, label=f"{name}-LoS")
+            if A_nlos is not None and n_nlos is not None:
+                y_nlos = A_nlos + 10.0 * n_nlos * np.log10(x_fit)
+                plt.plot(x_fit, y_nlos, linewidth=1.8, linestyle="--", label=f"{name}-NLoS")
+        elif model.get("type") == "3gpp_uma":
+            fc_ghz = model.get("freq_ghz", 2.4)
+            h_ut = model.get("h_ut_m", user_height_m)
+            if uav_heights:
+                heights = sorted(h for h in uav_heights if math.isfinite(h))
+                h_bs = heights[len(heights) // 2] if heights else (h_ut + 50.0)
+            else:
+                h_bs = model.get("h_bs_m", h_ut + 50.0)
+            h_diff = max(h_bs - h_ut, 0.0)
+            d3d = x_fit
+            d2d = np.sqrt(np.maximum(d3d * d3d - h_diff * h_diff, 1.0))
+            y_los = [uma_los_path_loss(d2d_i, d3d_i, fc_ghz, h_bs, h_ut) for d2d_i, d3d_i in zip(d2d, d3d)]
+            y_nlos = [
+                max(yl, uma_nlos_path_loss(d3d_i, fc_ghz, h_ut))
+                for yl, d3d_i in zip(y_los, d3d)
+            ]
+            plt.plot(x_fit, y_los, linewidth=1.8, label=f"{name}-LoS")
+            plt.plot(x_fit, y_nlos, linewidth=1.8, linestyle="--", label=f"{name}-NLoS")
+
+    plt.xscale("log")
+    plt.xlabel("Distance (m, log scale)")
+    plt.ylabel("Path loss (dB)")
+    plt.title("Path loss comparison (classic models)")
+    plt.grid(True, which="both", linestyle="--", alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+    return True
+
+
+def plot_plos_compare(
+    centers: List[float],
+    probs: List[float],
+    fit_params: Tuple[float, float, float],
+    al_params: Tuple[float, float],
+    output_path: Path,
+) -> bool:
+    """同图对比：经验 LoS、拟合 Logistic、Al-Hourani 曲线。"""
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception:
+        return False
+
+    a, b, c = fit_params
+    alpha, beta = al_params
+    xs = np.array([c for c, p in zip(centers, probs) if math.isfinite(p)], dtype=float)
+    ys = np.array([p for p in probs if math.isfinite(p)], dtype=float)
+    x_fit = np.linspace(0, 90, 181)
+    y_fit = 1.0 / (1.0 + a * np.exp(-b * (x_fit - c)))
+    y_al = 1.0 / (1.0 + alpha * np.exp(-beta * (x_fit - alpha)))
+
+    plt.figure(figsize=(6.8, 4.2))
+    plt.scatter(xs, ys, color="tab:blue", s=28, label="empirical")
+    plt.plot(x_fit, y_fit, color="tab:orange", linewidth=2.0, label="fitted")
+    plt.plot(x_fit, y_al, color="tab:green", linewidth=2.0, label="Al-Hourani")
+    plt.xlabel("Elevation angle (deg)")
+    plt.ylabel("p(LoS)")
+    plt.title("LoS probability comparison")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+    return True
+
+
+def plot_error_cdf(
+    error_dict: Dict[str, Dict[str, List[float]]],
+    output_path: Path,
+) -> bool:
+    """绘制误差 CDF 曲线（LoS/NLoS 分开）。"""
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+
+    plt.figure(figsize=(6.8, 4.2))
+    for model_name, groups in error_dict.items():
+        for cond_name, errors in groups.items():
+            xs, ys = build_cdf([abs(e) for e in errors])
+            if not xs:
+                continue
+            label = f"{model_name}-{cond_name}"
+            plt.plot(xs, ys, linewidth=1.6, label=label)
+
+    plt.xlabel("Absolute error (dB)")
+    plt.ylabel("CDF")
+    plt.title("Error CDF (classic models)")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+    return True
+
+
 def save_binned_los(
     output_path: Path,
     bin_edges: List[float],
@@ -400,11 +714,25 @@ def main() -> None:
     rows, bad = filter_valid_rows(rows, idx)
     print(f"samples: {len(rows)}  bad_samples: {bad}")
 
+    # 把常用字段提取成数组，后续计算会更方便
     distances = [r[idx["distance_m"]] for r in rows]
     elevations = [r[idx["elevation_deg"]] for r in rows]
     los_flags = [int(r[idx["los"]]) for r in rows]
     path_losses = [r[idx["path_loss_db"]] for r in rows]
     rx_dbm = [r[idx["rx_dbm"]] for r in rows]
+    user_height_m = 1.5
+    if "uav_z" in idx:
+        uav_heights = [r[idx["uav_z"]] for r in rows]
+    else:
+        # 由仰角与距离反推 UAV 高度（近似）
+        uav_heights = [
+            user_height_m + d * math.sin(math.radians(e)) for d, e in zip(distances, elevations)
+        ]
+    if "horizontal_m" in idx:
+        horizontal_m = [r[idx["horizontal_m"]] for r in rows]
+    else:
+        # 若没有水平距离字段，用几何关系补全
+        horizontal_m = [d * math.cos(math.radians(e)) for d, e in zip(distances, elevations)]
 
     # 1) LoS 概率分箱 + Logistic 拟合
     bin_deg = 5.0
@@ -418,6 +746,17 @@ def main() -> None:
         [v[2] for v in valid_bins],
     )
     print(f"fit_p_los: a={a:.4f} b={b:.4f} c={c:.4f} rmse={rmse_los:.4f} mae={mae_los:.4f}")
+
+    # Al-Hourani 经典模型对比（默认 Urban 参数）
+    al_env = "urban"
+    alpha, beta = AL_HOURANI_PRESETS.get(al_env, AL_HOURANI_PRESETS["urban"])
+    p_al = [al_hourani_prob(center, alpha, beta) if math.isfinite(p_emp) else float("nan") for center, p_emp in zip(centers, probs)]
+    valid_al = [(pe, pa, w) for pe, pa, w in zip(probs, p_al, counts) if math.isfinite(pe)]
+    rmse_al, mae_al = rmse_mae(
+        [v[0] for v in valid_al],
+        [v[1] for v in valid_al],
+        [v[2] for v in valid_al],
+    )
 
     # 2) 分离 LoS / NLoS，分别拟合路径损耗
     los_mask = [flag == 1 for flag in los_flags]
@@ -438,7 +777,56 @@ def main() -> None:
     pl_mean, pl_std = mean_std(path_losses)
     rx_mean, rx_std = mean_std(rx_dbm)
     los_ratio = sum(los_flags) / len(los_flags) if los_flags else float("nan")
+ 
+    # 经典路径损耗模型对比
+    classic_perf_rows: List[List[str]] = []
+    classic_error_cdf: Dict[str, Dict[str, List[float]]] = {}
+    classic_models_used: List[Dict] = []
+    for model in CLASSIC_PATH_LOSS_MODELS:
+        if not model.get("enabled", False):
+            continue
+        name = model.get("name", "classic")
+        preds = predict_classic_path_loss(
+            distances,
+            los_flags,
+            model,
+            horizontal_m=horizontal_m,
+            uav_heights=uav_heights,
+            user_height_m=user_height_m,
+        )
+        errors = [p - y if math.isfinite(p) else float("nan") for p, y in zip(preds, path_losses)]
+        err_los = [e for e, flag in zip(errors, los_flags) if flag == 1 and math.isfinite(e)]
+        err_nlos = [e for e, flag in zip(errors, los_flags) if flag == 0 and math.isfinite(e)]
 
+        metrics_los = compute_error_metrics(err_los)
+        metrics_nlos = compute_error_metrics(err_nlos)
+
+        classic_error_cdf[name] = {"los": err_los, "nlos": err_nlos}
+        classic_models_used.append(model)
+
+        for cond_name, metrics, errs in [
+            ("los", metrics_los, err_los),
+            ("nlos", metrics_nlos, err_nlos),
+        ]:
+            row = [
+                name,
+                cond_name,
+                f"{metrics['mean']:.6f}",
+                f"{metrics['rmse']:.6f}",
+                f"{metrics['mae']:.6f}",
+            ]
+            for th in ERROR_THRESHOLDS_DB:
+                row.append(f"{percent_within(errs, th):.6f}")
+            classic_perf_rows.append(row)
+
+    # 低仰角区域（<=15°）的差异统计
+    low_diffs = []
+    for center, p_emp, p_f, p_a in zip(centers, probs, p_fit, p_al):
+        if math.isfinite(p_emp) and center <= 15.0:
+            low_diffs.append(p_a - p_f)
+    low_angle_bias = sum(low_diffs) / len(low_diffs) if low_diffs else float("nan")
+
+    # 汇总成一个字典，方便写成 JSON 做记录/复现
     results = {
         "input_files": input_files,
         "dataset": {
@@ -458,6 +846,13 @@ def main() -> None:
             "rmse": rmse_los,
             "mae": mae_los,
         },
+        "al_hourani": {
+            "environment": al_env,
+            "alpha": alpha,
+            "beta": beta,
+            "rmse": rmse_al,
+            "mae": mae_al,
+        },
         "path_loss": {
             "los": {
                 "n": n_los,
@@ -474,6 +869,8 @@ def main() -> None:
                 "mae_db": resid_mae_nlos,
             },
         },
+        "classic_path_loss_models": classic_models_used,
+        "low_angle_bias_al_minus_fit": low_angle_bias,
         "global": {
             "los_ratio": los_ratio,
             "path_loss_mean_db": pl_mean,
@@ -508,6 +905,41 @@ def main() -> None:
         writer.writerow(["path_loss_mean_db", f"{pl_mean:.6f}"])
         writer.writerow(["path_loss_std_db", f"{pl_std:.6f}"])
 
+    # 保存经典模型参数表（CSV）
+    classic_params_csv = report_dir / "classic_params.csv"
+    with classic_params_csv.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["model", "parameter", "value"])
+        writer.writerow(["al_hourani", "environment", al_env])
+        writer.writerow(["al_hourani", "alpha", f"{alpha:.6f}"])
+        writer.writerow(["al_hourani", "beta", f"{beta:.6f}"])
+        for model in classic_models_used:
+            name = model.get("name", "classic")
+            writer.writerow([name, "type", model.get("type")])
+            if model.get("type") == "fspl_offset":
+                writer.writerow([name, "freq_hz", f"{model.get('freq_hz', 0.0):.6e}"])
+                writer.writerow([name, "nlos_offset_db", f"{model.get('nlos_offset_db', 0.0):.6f}"])
+            elif model.get("type") == "log_distance":
+                los_cfg = model.get("los", {})
+                nlos_cfg = model.get("nlos", {})
+                writer.writerow([name, "los_A_db", los_cfg.get("A_db")])
+                writer.writerow([name, "los_n", los_cfg.get("n")])
+                writer.writerow([name, "nlos_A_db", nlos_cfg.get("A_db")])
+                writer.writerow([name, "nlos_n", nlos_cfg.get("n")])
+            elif model.get("type") == "3gpp_uma":
+                writer.writerow([name, "freq_ghz", model.get("freq_ghz", 0.0)])
+                writer.writerow([name, "h_ut_m", model.get("h_ut_m", 1.5)])
+
+    # 保存经典模型误差对比表（CSV）
+    classic_perf_csv = report_dir / "classic_performance.csv"
+    with classic_perf_csv.open("w", newline="") as f:
+        writer = csv.writer(f)
+        header = ["model", "condition", "mean_err_db", "rmse_db", "mae_db"]
+        header += [f"pct_within_{int(th)}db" for th in ERROR_THRESHOLDS_DB]
+        writer.writerow(header)
+        for row in classic_perf_rows:
+            writer.writerow(row)
+
     # 保存 Markdown 摘要（便于阅读）
     md_path = report_dir / "fit_summary.md"
     with md_path.open("w") as f:
@@ -519,6 +951,12 @@ def main() -> None:
         f.write(f"- c: {c:.6f}\n")
         f.write(f"- RMSE: {rmse_los:.6f}\n")
         f.write(f"- MAE: {mae_los:.6f}\n\n")
+        f.write("## Classic LoS Probability (Al-Hourani)\n")
+        f.write(f"- env: {al_env}\n")
+        f.write(f"- alpha: {alpha:.6f}\n")
+        f.write(f"- beta: {beta:.6f}\n")
+        f.write(f"- RMSE: {rmse_al:.6f}\n")
+        f.write(f"- MAE: {mae_al:.6f}\n\n")
         f.write("## Path Loss Model (PL(d)=PL(d0)+10n*log10(d/d0), d0=1m)\n")
         f.write(f"- LoS: n={n_los:.6f}, PL(d0)={pl0_los:.6f} dB, sigma={sigma_los:.6f} dB\n")
         f.write(f"  RMSE={resid_rmse_los:.6f} dB, MAE={resid_mae_los:.6f} dB\n")
@@ -560,8 +998,14 @@ def main() -> None:
         f.write("- fit_params.csv\n")
         f.write("- fit_metrics.json\n")
         f.write("- plos_binned.csv\n")
+        f.write("- classic_params.csv\n")
+        f.write("- classic_performance.csv\n")
+        f.write("- classic_comparison_notes.md\n")
         f.write("- los_prob_vs_elevation.png\n")
         f.write("- path_loss_fit.png\n")
+        f.write("- plos_compare.png\n")
+        f.write("- classic_path_loss_compare.png\n")
+        f.write("- classic_error_cdf.png\n")
         f.write("- hist_elevation.png\n")
         f.write("- hist_distance.png\n")
         f.write("- residual_hist_los.png\n")
@@ -569,6 +1013,32 @@ def main() -> None:
         f.write("## Input Files\n")
         for path in input_files:
             f.write(f"- {path}\n")
+
+    # 经典模型对比摘要
+    classic_notes = report_dir / "classic_comparison_notes.md"
+    with classic_notes.open("w") as f:
+        f.write("# Classic Model Comparison Notes\n\n")
+        f.write("## LoS Probability\n")
+        f.write(f"- Al-Hourani env: {al_env}\n")
+        f.write(f"- alpha={alpha:.6f}, beta={beta:.6f}\n")
+        f.write(f"- RMSE (Al-Hourani vs empirical bins): {rmse_al:.6f}\n")
+        f.write(f"- MAE  (Al-Hourani vs empirical bins): {mae_al:.6f}\n")
+        f.write(f"- Low-angle bias (Al-Hourani - fitted, <=15 deg): {low_angle_bias:.6f}\n\n")
+
+        f.write("## Classic Path Loss Models\n")
+        if classic_models_used:
+            f.write("Models compared:\n")
+            for model in classic_models_used:
+                name = model.get("name")
+                if model.get("type") == "3gpp_uma":
+                    fc = model.get("freq_ghz", 0.0)
+                    h_ut = model.get("h_ut_m", 1.5)
+                    f.write(f"- {name} (freq_ghz={fc}, h_ut_m={h_ut})\n")
+                else:
+                    f.write(f"- {name}\n")
+        else:
+            f.write("No classic path loss model enabled. Update CLASSIC_PATH_LOSS_MODELS to enable.\n")
+
 
     # 保存分箱统计表
     binned_csv = report_dir / "plos_binned.csv"
@@ -591,6 +1061,24 @@ def main() -> None:
         pl0_nlos,
         report_dir / "path_loss_fit.png",
     )
+    plot_plos_compare(
+        centers,
+        probs,
+        (a, b, c),
+        (alpha, beta),
+        report_dir / "plos_compare.png",
+    )
+    if classic_models_used:
+        plot_path_loss_classic(
+            distances,
+            path_losses,
+            los_flags,
+            classic_models_used,
+            report_dir / "classic_path_loss_compare.png",
+            uav_heights=uav_heights,
+            user_height_m=user_height_m,
+        )
+        plot_error_cdf(classic_error_cdf, report_dir / "classic_error_cdf.png")
     plot_histogram(elevations, 40, "Elevation distribution", "elevation (deg)", report_dir / "hist_elevation.png")
     plot_histogram(distances, 50, "Distance distribution", "distance (m)", report_dir / "hist_distance.png")
     plot_histogram(resid_los, 40, "Residual (LoS)", "PL residual (dB)", report_dir / "residual_hist_los.png")

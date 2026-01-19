@@ -1,0 +1,13 @@
+model,region,rmse,mae,valid_bins
+fit_logistic,all,0.034895,0.030768,14
+fit_logistic,low,0.051650,0.051156,2
+fit_logistic,mid,0.026523,0.024400,6
+fit_logistic,high,0.035335,0.030340,6
+al_hourani_urban,all,0.458060,0.419110,14
+al_hourani_urban,low,0.070973,0.068159,2
+al_hourani_urban,mid,0.478605,0.450154,6
+al_hourani_urban,high,0.508759,0.505050,6
+al_hourani_dense,all,0.314628,0.263223,14
+al_hourani_dense,low,0.026414,0.026409,2
+al_hourani_dense,mid,0.210300,0.174320,6
+al_hourani_dense,high,0.431880,0.431065,6
